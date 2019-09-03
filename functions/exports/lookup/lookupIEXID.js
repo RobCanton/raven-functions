@@ -1,4 +1,4 @@
-exports.iexID = function(systemDatabase, symbol) {
+exports.withSymbol = function(symbol, systemDatabase) {
   return new Promise((resolve, reject) => {
 
     let getIEXID = systemDatabase.child(`global/symbols`).orderByChild('symbol').equalTo(symbol).once('value');
