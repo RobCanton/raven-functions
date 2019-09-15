@@ -91,245 +91,9 @@ exports.deleteAlert = functions.https.onCall((data, context) => {
 
 });
 
-exports.addToWatchlist = functions.https.onCall((data, context) => {
-  const uid = context.auth.uid;
 
-  const symbol = data.symbol;
-
-  var iexID = null;
-
-  var intradayArray = [];
-
-  let lookupIEXID = require('./exports/lookup/lookupIEXID.js');
-  let lookupIEXIDWithSymbol = lookupIEXID.withSymbol(symbol, systemDatabase);
-
-  let currentDateStr = utilties.formatDate(new Date());
-
-  return lookupIEXIDWithSymbol.then( id => {
-    iexID = id;
-
-    let checkActivity = database.child(`global/active/${iexID}`).once('value');
-    return checkActivity;
-
-  }).then( activitySnapshot => {
-    if (activitySnapshot.exists()) {
-      return Promise.resolve(null);
-    }
-    let setActive = database.child(`global/active/${iexID}`).set(true);
-    return setActive;
-
-  }).then( result => {
-
-    if (result !== null) {
-
-      var date = "";
-
-      var intradayObject = {};
-      return iexCloudAPI.stockIntradayPrices(symbol).then ( intradayResults => {
-
-        for (var i = 0; i < intradayResults.length; i++) {
-          let result = intradayResults[i];
-          date = result.date;
-          let minute = result.minute;
-          var price = -1;
-          if (result.average) {
-            price = result.average;
-          } else if (result.marketAverage) {
-            price = result.marketAverage;
-          }
-          var intradayQuote = {
-            price: price,
-            minute: minute
-          }
-
-          intradayObject[minute] = intradayQuote;
-          intradayArray.push(intradayQuote);
-        }
-
-        let quoteParams = {
-          filter:`change,changePercent,companyName,latestPrice,latestUpdate,symbol,latestSource`
-        };
-
-        return iexCloudAPI.stockQuote(symbol, quoteParams);
-
-      }).then( latestQuote => {
-        console.log("latestQuote:");
-        let latestUpdate = latestQuote.latestUpdate;
-        let minute = utilties.formatDateHHMM(utilties.ConvertUTCTimeToLocalTime(latestUpdate));
-
-        var intradayQuote = {
-          price: latestQuote.latestPrice,
-          minute: minute,
-          latestUpdate: latestUpdate,
-          change: latestQuote.change,
-          changePercent: latestQuote.changePercent
-        }
-
-        console.log("Minute: " + minute);
-        console.log(util.inspect(latestQuote, false, null, true));
-
-        intradayObject[minute] = intradayQuote;
-        intradayArray.push(intradayQuote);
-
-        let setIntraday = database.child(`global/intra-day/${iexID}`).set(intradayObject);
-        return setIntraday;
-      }).then (() => {
-        return Promise.resolve()
-      });
-    } else {
-      let getIntraday = database.child(`global/intra-day/${iexID}`).orderByKey().once('value');
-      return getIntraday.then ( intradaySnapshot => {
-
-        intradaySnapshot.forEach( quote => {
-          intradayArray.push(quote.val());
-        });
-
-        return Promise.resolve();
-
-      });
-
-    }
-
-  }).then( () => {
-    console.log("Intraday Array: " + intradayArray);
-    let updateObject = {};
-    updateObject[`global/watchlist/${iexID}/${uid}`] = true;
-    updateObject[`user/watchlist/${uid}/${iexID}`] = true;
-
-    let update = database.update(updateObject);
-    return update;
-  }).then( () => {
-    return {
-      success: true,
-      iexID: iexID,
-      intradayArray: intradayArray
-    }
-  }).catch( e => {
-    console.log(e);
-    return {
-      success: false,
-      error: e
-    }
-  })
-
-});
-
-exports.removeFromWatchlist = functions.https.onCall((data, context) => {
-  console.log("deleteAlert");
-
-  const uid = context.auth.uid;
-  let iexID = data.iexID;
-
-  if (iexID === undefined) {
-    console.log("Throw error!");
-    throw new functions.https.HttpsError(400, 'invalid-argument', 'Arguments invalid or missing: iexID');
-  }
-
-  var updateObject = {};
-  updateObject[`global/watchlist/${iexID}/${uid}`] = null;
-  updateObject[`user/watchlist/${uid}/${iexID}`] = null;
-  updateObject[`user/alerts/${uid}/${iexID}`] = null;
-
-  return database.update(updateObject).then ( () => {
-    return {
-      success: true
-    }
-  }).catch( e => {
-    console.log(e);
-    throw new functions.https.HttpsError(500, 'internal-server-error', 'An internal server error has occurred.');
-  });
-
-});
-
-exports.exchanges = functions.https.onRequest((req, res) => {
-  console.log("Exchanges!");
-
-  return iexCloudAPI.refUSExchanges().then( results => {
-
-    var object = {};
-
-    results.forEach( exchange => {
-      let refId = exchange.refId;
-      let name = exchange.name;
-      let longName = exchange.longName;
-      let mic = exchange.mic;
-
-      if (refId && name && longName && mic) {
-        let exchangeData = {
-          name: exchange.name,
-          longName: longName,
-          mic: exchange.mic
-        }
-        object[refId] = exchangeData;
-      }
-
-    })
-
-    let ref = systemDatabase.child(`ref/exchanges/us`);
-    return ref.update(object);
-
-  }).then( () => {
-    return res.send({
-      success: true
-    })
-  }).catch( e => {
-    console.log(e);
-    return res.send({
-      success: false,
-      error: e
-    })
-  })
-});
-
-exports.updateExchanges = functions.pubsub.schedule('every day 18:24').timeZone('America/New_York').onRun((context) => {
-  let params = `?token=${IEXCLOUD_APIKEY}`;
-  let endpoint = `ref-data/exchanges`;
-  let uri = `${BASE_URL}${endpoint}${params}`;
-
-  var options = {
-    uri: uri,
-    json: true
-  };
-
-  return rp(options).then(results => {
-
-    var updateObject = {};
-    results.forEach(exchangeObj => {
-      let key = exchangeObj.exchange;
-      updateObject[key] = exchangeObj;
-    });
-
-    let updateRequest = systemDatabase.child("global/exchanges").update(updateObject);
-    return updateRequest;
-  }).then(() => {
-    let params = `?token=${IEXCLOUD_APIKEY}`;
-    let endpoint = `ref-data/symbols`;
-    let uri = `${BASE_URL}${endpoint}${params}`;
-
-    var options = {
-      uri: uri,
-      json: true
-    };
-    return rp(options);
-  }).then(results => {
-    console.log("all symbols: ", results);
-
-    var updateObject = {};
-    results.forEach(symbolObj => {
-      let key = symbolObj.iexId;
-      updateObject[key] = symbolObj;
-    });
-
-    let updateRequest = systemDatabase.child("global/symbols").update(updateObject);
-    return updateRequest
-  }).catch(e => {
-    return Promise.reject(e);
-  })
-});
-
-
-exports.priceUpdater = functions.pubsub.schedule('every 1 minutes').onRun((context) => {
-  console.log('This will be run every 1 minutes!');
+exports.priceUpdater = functions.pubsub.schedule('every 48 hours').onRun((context) => {
+  //console.log('This will be run every 1 minutes!');
 
   let lookupSymbol = require('./exports/lookup/lookupSymbol.js');
 
@@ -548,4 +312,144 @@ exports.deliverNotification = functions.database.ref('app/user/notifications/{ui
 
 
   return Promise.all(promises);
+});
+
+
+// Exchange
+exports.createExchange = functions.firestore.document('exchanges/{id}').onCreate((change, context) => {
+  const newValue = snap.data();
+
+  let exchangeID = newValue.exchangeID;
+  let region = newValue.region;
+
+  let uri = `http://replicode.io:3000/ref-data/exchange/${region}/${exchangeID}`;
+  var options = {
+    method: 'POST',
+    uri: uri,
+    body: newValue,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+});
+
+exports.updateExchange = functions.firestore.document('exchanges/{id}').onUpdate((change, context) => {
+  const newValue = change.after.data();
+
+  let exchangeID = newValue.exchangeID;
+  let region = newValue.region;
+
+  let uri = `http://replicode.io:3000/ref-data/exchange/${region}/${exchangeID}`;
+  var options = {
+    method: 'POST',
+    uri: uri,
+    body: newValue,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+});
+
+exports.deleteExchange = functions.firestore.document('exchanges/{id}').onDelete((snap, context) => {
+
+  const deletedValue = snap.data();
+  let exchangeID = deletedValue.exchangeID;
+  let region = deletedValue.region;
+
+  let uri = `http://replicode.io:3000/ref-data/exchange/${region}/${exchangeID}`;
+  var options = {
+    method: 'DELETE',
+    uri: uri,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+
+});
+
+
+// Timezone
+exports.createTimezone = functions.firestore.document('timezones/{id}').onCreate((snap, context) => {
+  const newValue = snap.data();
+
+  let timezone = newValue.timezone;
+
+  let uri = `http://replicode.io:3000/timezone/${timezone}`;
+  var options = {
+    method: 'POST',
+    uri: uri,
+    body: newValue,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+
+});
+
+exports.updateTimezone = functions.firestore.document('timezones/{id}').onUpdate((change, context) => {
+  const newValue = change.after.data();
+
+  let timezone = newValue.timezone;
+
+  let uri = `http://replicode.io:3000/timezone/${timezone}`;
+  var options = {
+    method: 'POST',
+    uri: uri,
+    body: newValue,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+});
+
+exports.deleteExchange = functions.firestore.document('timezones/{id}').onDelete((snap, context) => {
+
+  const deletedValue = snap.data();
+  let timezone = deletedValue.timezone;
+
+  let uri = `http://replicode.io:3000/timezone/${timezone}`;
+  var options = {
+    method: 'DELETE',
+    uri: uri,
+    json: true
+  };
+
+  return rp(options).then( results => {
+    console.log(results);
+    return Promise.resolve(results);
+  }).catch( err => {
+    console.log(err);
+    return Promise.reject(err);
+  })
+
 });
